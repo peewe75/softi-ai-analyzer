@@ -15,6 +15,13 @@ View your app in AI Studio: https://ai.studio/apps/f12c97d9-73f9-44cb-87e5-a225d
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. Set your Gemini key in `.env`:
+   `VITE_GEMINI_API_KEY=your_key_here`
+   (fallback supported: `GEMINI_API_KEY`)
 3. Run the app:
    `npm run dev`
+
+## Operations Docs
+
+- Admin validation matrix: `docs/admin-test-matrix.md`
+- Deploy and rollback runbook: `docs/deploy-runbook.md`
