@@ -14,6 +14,7 @@ import { createBillingRouter } from './server/routes/billing.js';
 import { createFeedsRouter } from './server/routes/feeds.js';
 import crypto from 'crypto';
 import { initMt5Bridge } from './server/mt5/bridge.js';
+import { normalizeActiveFeeds, resolveMarketData } from './server/services/market-data.js';
 
 type ProfileRole = 'owner' | 'admin' | 'user';
 type CanonicalRole = 'admin' | 'user';
@@ -598,18 +599,21 @@ async function startServer() {
       const { profile, error: profileError } = await getRequesterProfile(req);
       if (profileError) return res.status(profileError.status).json(profileError.body);
 
-      const { type, symbols, prompt, model = "gemini-1.5-pro" } = req.body;
+      const { type, symbols, prompt, model = "gemini-1.5-pro", activeFeeds } = req.body;
 
       if (!type || !symbols) {
         return res.status(400).json({ error: 'Missing type or symbols' });
       }
 
+      const normalizedFeeds = normalizeActiveFeeds(activeFeeds);
+
       // 1. Calculate deterministic query hash
-      const hashInput = JSON.stringify({ type, symbols, prompt, model }).toLowerCase();
+      const hashInput = JSON.stringify({ type, symbols, prompt, model, activeFeeds: normalizedFeeds }).toLowerCase();
       const query_hash = crypto.createHash('md5').update(hashInput).digest('hex');
 
       // 2. Check for fresh cached result (valid for 6 hours)
-      const { data: cached, error: cacheError } = await supabaseAdmin
+      let cached: any = null;
+      const { data: cachedResult, error: cacheError } = await supabaseAdmin
         .from('analysis_archives')
         .select('*')
         .eq('query_hash', query_hash)
@@ -618,12 +622,21 @@ async function startServer() {
         .limit(1)
         .maybeSingle();
 
+      if (isMissingSupabaseResource(cacheError)) {
+        console.warn('[AI CACHE] analysis_archives missing, continuing without cache');
+      } else if (cacheError) {
+        throw cacheError;
+      } else {
+        cached = cachedResult;
+      }
+
       if (cached) {
         console.log(`[AI CACHE HIT] type=${type} hash=${query_hash}`);
         return res.json({
           content: cached.content,
           cached: true,
-          expires_at: cached.expires_at
+          expires_at: cached.expires_at,
+          activeFeeds: normalizedFeeds,
         });
       }
 
@@ -642,21 +655,47 @@ async function startServer() {
       }
 
       let resultText = "";
+      let providersUsed: string[] = [];
+      let warnings: string[] = [];
       try {
-        const response = await ai.models.generateContent({
-          model: serverModel,
-          contents,
-          config: { tools: [{ googleSearch: {} }] },
-        });
-        resultText = response.text || "";
+        if (type === 'market_data') {
+          const resolved = await resolveMarketData({
+            ai,
+            symbols,
+            activeFeeds: normalizedFeeds,
+          });
+          resultText = JSON.stringify(resolved.rows);
+          providersUsed = resolved.providersUsed;
+          warnings = resolved.warnings;
+        } else {
+          const response = await ai.models.generateContent({
+            model: serverModel,
+            contents,
+            config: { tools: [{ googleSearch: {} }] },
+          });
+          resultText = response.text || "";
+        }
       } catch (toolsErr: any) {
         console.warn(`[AI ANALYZE] First attempt failed (${toolsErr?.message}), retrying without tools...`);
         try {
-          const fallback = await ai.models.generateContent({ model: serverModel, contents });
-          resultText = fallback.text || "";
+          if (type === 'market_data') {
+            const resolved = await resolveMarketData({
+              ai,
+              symbols,
+              activeFeeds: normalizedFeeds.filter((feed) => feed !== 'google'),
+            });
+            resultText = JSON.stringify(resolved.rows);
+            providersUsed = resolved.providersUsed;
+            warnings = [`Primary market_data pipeline failed: ${toolsErr?.message || 'unknown error'}`, ...resolved.warnings];
+          } else {
+            const fallback = await ai.models.generateContent({ model: serverModel, contents });
+            resultText = fallback.text || "";
+          }
         } catch (fallbackErr) {
           const stableModel = "gemini-2.0-flash";
-          if (serverModel !== stableModel) {
+          if (type === 'market_data') {
+            throw fallbackErr;
+          } else if (serverModel !== stableModel) {
             console.warn(`[AI ANALYZE] Model "${serverModel}" unavailable, falling back to ${stableModel}...`);
             const lastResort = await ai.models.generateContent({ model: stableModel, contents });
             resultText = lastResort.text || "";
@@ -689,9 +728,20 @@ async function startServer() {
           expires_at: expires_at
         });
 
-      if (insertError) console.error('[AI ARCHIVE INSERT ERROR]', insertError);
+      if (isMissingSupabaseResource(insertError)) {
+        console.warn('[AI CACHE] analysis_archives missing, skipping archive insert');
+      } else if (insertError) {
+        console.error('[AI ARCHIVE INSERT ERROR]', insertError);
+      }
 
-      res.json({ content: resultText, cached: false, expires_at });
+      res.json({
+        content: resultText,
+        cached: false,
+        expires_at,
+        activeFeeds: normalizedFeeds,
+        providersUsed,
+        warnings,
+      });
     } catch (error: any) {
       console.error('[AI ANALYZE ERROR]', error);
       res.status(500).json({ error: error.message });

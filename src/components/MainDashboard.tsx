@@ -207,7 +207,17 @@ export default function MainDashboard() {
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [selectedAssets, setSelectedAssets] = useState<string[]>(['eurusd', 'xauusd', 'btc']);
-    const [activeFeeds, setActiveFeeds] = useState<string[]>(['google']);
+    const [activeFeeds, setActiveFeeds] = useState<string[]>(() => {
+        const cached = localStorage.getItem('softi_active_feeds');
+        if (!cached) return ['google'];
+
+        try {
+            const parsed = JSON.parse(cached);
+            return Array.isArray(parsed) && parsed.length > 0 ? parsed : ['google'];
+        } catch {
+            return ['google'];
+        }
+    });
     const [expandedAssetCategories, setExpandedAssetCategories] = useState<string[]>(['Forex']);
     const [lastUpdate, setLastUpdate] = useState<Date>(() => {
         const cached = localStorage.getItem('softi_last_update');
@@ -232,15 +242,22 @@ export default function MainDashboard() {
     // AI calls are now handled by the backend /api/ai/analyze endpoint
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const activeFeedsKey = [...activeFeeds].sort().join(',');
 
-    const refreshMarketData = async (isManual = false) => {
+    useEffect(() => {
+        localStorage.setItem('softi_active_feeds', JSON.stringify(activeFeeds));
+    }, [activeFeeds]);
+
+    const refreshMarketData = async (isManual = false, force = false) => {
         if (isLoading) return;
         if (user && !synced) return;
         const now = new Date().getTime();
         const timeSinceLastUpdate = now - lastUpdate.getTime();
 
-        if (isManual && timeSinceLastUpdate < 5000) return;
-        if (!isManual && timeSinceLastUpdate < 120000) return; // 2 minutes
+        if (!force) {
+            if (isManual && timeSinceLastUpdate < 5000) return;
+            if (!isManual && timeSinceLastUpdate < 120000) return; // 2 minutes
+        }
 
         setIsLoading(true);
         try {
@@ -256,7 +273,8 @@ export default function MainDashboard() {
                 body: JSON.stringify({
                     type: 'market_data',
                     symbols: allSymbols,
-                    model: "gemini-1.5-flash"
+                    model: "gemini-1.5-flash",
+                    activeFeeds,
                 })
             });
 
@@ -293,7 +311,17 @@ export default function MainDashboard() {
         refreshMarketData(false);
         const interval = setInterval(() => refreshMarketData(false), 120000); // 2 minutes
         return () => clearInterval(interval);
-    }, [lastUpdate, getToken, user, synced]);
+    }, [lastUpdate, getToken, user, synced, activeFeedsKey]);
+
+    useEffect(() => {
+        if (user && !synced) {
+            return;
+        }
+
+        setLastUpdate(new Date(0));
+        localStorage.removeItem('softi_last_update');
+        refreshMarketData(true, true);
+    }, [activeFeedsKey, user, synced]);
 
     useEffect(() => {
         if (notifications.length === 0) return;

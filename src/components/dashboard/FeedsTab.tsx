@@ -287,7 +287,7 @@ export default function FeedsTab({
                             <div className="rounded-2xl border border-dashed border-[#30363D] bg-[#11161E] px-5 py-10 text-center">
                                 <p className="text-sm font-semibold text-white">Connetti il provider News & Events</p>
                                 <p className="mt-2 text-sm leading-6 text-[#8B949E]">
-                                    Una volta abilitato, questa colonna mostrerà le ultime headline aggregate da ForexLive e Yahoo Finance.
+                                    Una volta abilitato, questa colonna mostrerà le ultime headline aggregate dai feed RSS e dal contesto Marketaux quando disponibile.
                                 </p>
                             </div>
                         ) : feedError ? (
