@@ -36,11 +36,31 @@ type AuthenticatedRequest = express.Request & {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const renderOriginPattern = /^https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)*\.onrender\.com$/i;
+const spaRoutePattern = /^\/(?!api(?:\/|$)).*/;
+
+const isAllowedCorsOrigin = (origin?: string | null) => {
+  if (!origin) return true;
+  if (origin === 'https://ultrabot.space') return true;
+  if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) return true;
+  return renderOriginPattern.test(origin);
+};
 
 async function startServer() {
   const app = express();
   const httpServer = createServer(app);
-  const io = new Server(httpServer, { cors: { origin: "*" } });
+  const io = new Server(httpServer, {
+    cors: {
+      origin: (origin, callback) => {
+        if (isAllowedCorsOrigin(origin)) {
+          callback(null, true);
+          return;
+        }
+        callback(new Error("CORS origin not allowed"));
+      },
+      credentials: true,
+    },
+  });
 
   const PORT = Number(process.env.PORT) || 3000;
   const geminiApiKey = process.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
@@ -53,6 +73,26 @@ async function startServer() {
   console.log("-----------------------------------\n");
 
   const ai = new GoogleGenAI({ apiKey: geminiApiKey || "" });
+
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (isAllowedCorsOrigin(origin)) {
+      if (origin) {
+        res.header('Access-Control-Allow-Origin', origin);
+        res.header('Vary', 'Origin');
+      }
+      res.header('Access-Control-Allow-Credentials', 'true');
+      res.header('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+      res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+    }
+
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(204);
+      return;
+    }
+
+    next();
+  });
 
   app.use(express.json());
   app.use(express.text());
@@ -1494,7 +1534,7 @@ async function startServer() {
     const distPath = path.resolve(__dirname, "dist");
     console.log(`[PROD] Servizio da: ${distPath}`);
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
+    app.get(spaRoutePattern, (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
