@@ -324,6 +324,10 @@ export default function MainDashboard() {
             return;
         }
 
+        if (userRole === 'admin' || userRole === 'owner') {
+            return;
+        }
+
         const required = tabEntitlements[activeTab];
         if (!required || required.length === 0) {
             return;
