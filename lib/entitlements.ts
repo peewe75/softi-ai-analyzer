@@ -11,6 +11,10 @@ function pickEntitlementKey(row: EntitlementRow): string | null {
   return row.key || row.service_key || row.entitlement_key || row.name || null;
 }
 
+function isMissingTableError(error: { code?: string; message?: string } | null) {
+  return error?.code === 'PGRST205' || error?.code === '42P01';
+}
+
 export async function resolveEffectiveEntitlements(profileId: string, planId?: string | null) {
   const keys = new Set<string>();
 
@@ -19,6 +23,10 @@ export async function resolveEffectiveEntitlements(profileId: string, planId?: s
       .from('plan_entitlements')
       .select('entitlements(*)')
       .eq('plan_id', planId);
+
+    if (isMissingTableError(planError)) {
+      return [];
+    }
 
     if (!planError && planEntitlements) {
       for (const row of planEntitlements as any[]) {
@@ -32,6 +40,10 @@ export async function resolveEffectiveEntitlements(profileId: string, planId?: s
     .from('user_entitlement_overrides')
     .select('enabled, entitlements(*)')
     .eq('profile_id', profileId);
+
+  if (isMissingTableError(overrideError)) {
+    return Array.from(keys).sort();
+  }
 
   if (!overrideError && overrides) {
     for (const row of overrides as any[]) {

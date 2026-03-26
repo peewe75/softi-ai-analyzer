@@ -235,6 +235,7 @@ export default function MainDashboard() {
 
     const refreshMarketData = async (isManual = false) => {
         if (isLoading) return;
+        if (user && !synced) return;
         const now = new Date().getTime();
         const timeSinceLastUpdate = now - lastUpdate.getTime();
 
@@ -285,10 +286,14 @@ export default function MainDashboard() {
     };
 
     useEffect(() => {
+        if (user && !synced) {
+            return;
+        }
+
         refreshMarketData(false);
         const interval = setInterval(() => refreshMarketData(false), 120000); // 2 minutes
         return () => clearInterval(interval);
-    }, [lastUpdate, getToken]);
+    }, [lastUpdate, getToken, user, synced]);
 
     useEffect(() => {
         if (notifications.length === 0) return;

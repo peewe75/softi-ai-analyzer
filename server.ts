@@ -38,12 +38,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const renderOriginPattern = /^https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)*\.onrender\.com$/i;
 const spaRoutePattern = /^\/(?!api(?:\/|$)).*/;
+const missingSupabaseCodes = new Set(['PGRST205', '42P01', '42703']);
 
 const isAllowedCorsOrigin = (origin?: string | null) => {
   if (!origin) return true;
   if (origin === 'https://ultrabot.space') return true;
   if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) return true;
   return renderOriginPattern.test(origin);
+};
+
+const isMissingSupabaseResource = (error: { code?: string; message?: string } | null | undefined) => {
+  if (!error) return false;
+  if (error.code && missingSupabaseCodes.has(error.code)) return true;
+  const message = String(error.message || '').toLowerCase();
+  return message.includes('could not find the table') || message.includes('column') && message.includes('schema cache');
 };
 
 async function startServer() {
@@ -131,20 +139,49 @@ async function startServer() {
     next();
   };
 
+  const getClerkIdentity = async (userId: string) => {
+    const user = await clerkClient.users.getUser(userId);
+    const email = (user.emailAddresses[0]?.emailAddress || '').trim().toLowerCase();
+    return {
+      email,
+      firstName: user.firstName || '',
+      lastName: user.lastName || '',
+      role: normalizeRole((user.publicMetadata as any)?.role) || 'user',
+    };
+  };
+
+  const findProfileByAuthUserId = async (userId: string) => {
+    const identity = await getClerkIdentity(userId);
+    if (!identity.email) {
+      return { profile: null, identity, error: { status: 400, body: { error: 'Authenticated user is missing an email address' } } };
+    }
+
+    const { data: profile, error } = await supabaseAdmin
+      .from('profiles')
+      .select('*')
+      .eq('email', identity.email)
+      .maybeSingle();
+
+    if (error) {
+      return { profile: null, identity, error: { status: 500, body: { error: error.message } } };
+    }
+
+    if (!profile) {
+      return { profile: null, identity, error: { status: 404, body: { error: 'Profile not found' } } };
+    }
+
+    return { profile, identity, error: null };
+  };
+
   const getRequesterProfile = async (req: AuthenticatedRequest) => {
     const userId = req.auth?.userId;
     if (!userId) {
       return { profile: null, error: { status: 401, body: { error: 'Unauthorized' } } };
     }
 
-    const { data: profile, error } = await supabaseAdmin
-      .from('profiles')
-      .select('*')
-      .eq('clerk_user_id', userId)
-      .single();
-
+    const { profile, error } = await findProfileByAuthUserId(userId);
     if (error || !profile) {
-      return { profile: null, error: { status: 403, body: { error: 'Forbidden' } } };
+      return { profile: null, error: error || { status: 403, body: { error: 'Forbidden' } } };
     }
 
     return { profile, error: null };
@@ -228,7 +265,7 @@ async function startServer() {
   };
 
   const getActivePlanIdForProfile = async (profileId: string) => {
-    const { data: currentSubscription } = await supabaseAdmin
+    const { data: currentSubscription, error: subscriptionError } = await supabaseAdmin
       .from('subscriptions')
       .select('plan_id')
       .eq('user_id', profileId)
@@ -237,13 +274,20 @@ async function startServer() {
       .limit(1)
       .maybeSingle();
 
+    if (isMissingSupabaseResource(subscriptionError)) {
+      return null;
+    }
+
     let planId = (currentSubscription as any)?.plan_id || null;
     if (!planId) {
-      const { data: freePlan } = await supabaseAdmin
+      const { data: freePlan, error: freePlanError } = await supabaseAdmin
         .from('plans')
         .select('id')
         .eq('name', 'free')
         .maybeSingle();
+      if (isMissingSupabaseResource(freePlanError)) {
+        return null;
+      }
       planId = (freePlan as any)?.id || null;
     }
     return planId as string | null;
@@ -257,6 +301,10 @@ async function startServer() {
         .from('plan_limits')
         .select('limit_key, limit_value, window')
         .eq('plan_id', planId);
+
+      if (isMissingSupabaseResource(planLimitsError)) {
+        return {};
+      }
 
       if (!planLimitsError && planLimits) {
         for (const row of planLimits as any[]) {
@@ -275,6 +323,10 @@ async function startServer() {
       .from('user_limit_overrides')
       .select('limit_key, limit_value, window, enabled')
       .eq('profile_id', profileId);
+
+    if (isMissingSupabaseResource(overridesError)) {
+      return Object.fromEntries(result.entries());
+    }
 
     if (!overridesError && overrides) {
       for (const row of overrides as any[]) {
@@ -362,21 +414,11 @@ async function startServer() {
     const userId = (req as any).auth.userId;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     try {
-      const user = await clerkClient.users.getUser(userId);
-      const email = user.emailAddresses[0]?.emailAddress || req.body?.email || "";
-      const firstName = user.firstName || req.body?.firstName || "Utente";
-      const metaRole = (user.publicMetadata as any)?.role;
-
-      const { data: existingProfile } = await supabaseAdmin
-        .from('profiles')
-        .select('id')
-        .eq('clerk_user_id', userId)
-        .maybeSingle();
-
-      const roleForNewUser = normalizeRole(metaRole) || 'user';
-      const roleOverride = existingProfile ? undefined : roleForNewUser;
-
-      const profile = await syncClerkUser(userId, email, firstName, "", roleOverride);
+      const identity = await getClerkIdentity(userId);
+      const email = identity.email || req.body?.email || "";
+      const firstName = identity.firstName || req.body?.firstName || "Utente";
+      const lastName = identity.lastName || req.body?.lastName || "";
+      const profile = await syncClerkUser(userId, email, firstName, lastName, identity.role);
       res.json({ success: true, profile });
     } catch (error: any) {
       console.error('[SYNC ERROR]:', error.message);
@@ -389,9 +431,9 @@ async function startServer() {
     const userId = (req as any).auth.userId;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     try {
-      const { data: profile } = await supabaseAdmin.from('profiles').select('*').eq('clerk_user_id', userId).single();
-      if (!profile) {
-        return res.status(404).json({ error: 'Profile not found' });
+      const { profile, error } = await findProfileByAuthUserId(userId);
+      if (error || !profile) {
+        return res.status(error?.status || 404).json(error?.body || { error: 'Profile not found' });
       }
       res.json({ clerkUserId: userId, profile });
     } catch (e: any) {
@@ -403,8 +445,8 @@ async function startServer() {
     const userId = (req as any).auth.userId;
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
     try {
-      const { data: profile } = await supabaseAdmin.from('profiles').select('id').eq('clerk_user_id', userId).single();
-      if (!profile) return res.status(404).json({ error: 'No profile' });
+      const { profile, error } = await findProfileByAuthUserId(userId);
+      if (error || !profile) return res.status(error?.status || 404).json(error?.body || { error: 'No profile' });
       const planId = await getActivePlanIdForProfile(profile.id);
       const entitlements = await resolveEffectiveEntitlements(profile.id, planId);
       res.json({ entitlements });
@@ -417,13 +459,8 @@ async function startServer() {
     const userId = (req as any).auth.userId;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     try {
-      const { data: profile } = await supabaseAdmin
-        .from('profiles')
-        .select('id')
-        .eq('clerk_user_id', userId)
-        .single();
-
-      if (!profile) return res.status(404).json({ error: 'No profile' });
+      const { profile, error } = await findProfileByAuthUserId(userId);
+      if (error || !profile) return res.status(error?.status || 404).json(error?.body || { error: 'No profile' });
 
       const planId = await getActivePlanIdForProfile(profile.id);
       const limits = await resolveEffectiveLimits(profile.id, planId);
@@ -437,13 +474,8 @@ async function startServer() {
     const userId = (req as any).auth.userId;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
     try {
-      const { data: profile } = await supabaseAdmin
-        .from('profiles')
-        .select('id')
-        .eq('clerk_user_id', userId)
-        .single();
-
-      if (!profile) return res.status(404).json({ error: 'No profile' });
+      const { profile, error: profileError } = await findProfileByAuthUserId(userId);
+      if (profileError || !profile) return res.status(profileError?.status || 404).json(profileError?.body || { error: 'No profile' });
 
       const { data, error } = await supabaseAdmin
         .from('usage_counters')
@@ -451,6 +483,10 @@ async function startServer() {
         .eq('profile_id', profile.id)
         .order('window_start', { ascending: false })
         .limit(50);
+
+      if (isMissingSupabaseResource(error)) {
+        return res.json({ usage: [] });
+      }
 
       if (error) return res.status(500).json({ error: error.message });
       res.json({ usage: data || [] });
@@ -467,13 +503,8 @@ async function startServer() {
       const amount = Math.max(1, Number(req.body?.amount || 1));
       const assetCount = Math.max(0, Number(req.body?.asset_count || 0));
 
-      const { data: profile } = await supabaseAdmin
-        .from('profiles')
-        .select('id')
-        .eq('clerk_user_id', userId)
-        .single();
-
-      if (!profile) return res.status(404).json({ error: 'No profile' });
+      const { profile, error: profileError } = await findProfileByAuthUserId(userId);
+      if (profileError || !profile) return res.status(profileError?.status || 404).json(profileError?.body || { error: 'No profile' });
 
       const planId = await getActivePlanIdForProfile(profile.id);
       const limits = await resolveEffectiveLimits(profile.id, planId);
@@ -503,6 +534,10 @@ async function startServer() {
         .eq('window_end', end.toISOString())
         .maybeSingle();
 
+      if (isMissingSupabaseResource(existingCounterError)) {
+        return res.json({ success: true, unlimited: true });
+      }
+
       if (existingCounterError) return res.status(500).json({ error: existingCounterError.message });
 
       const current = Number((existingCounter as any)?.used_count || 0);
@@ -524,6 +559,9 @@ async function startServer() {
           .from('usage_counters')
           .update({ used_count: next })
           .eq('id', (existingCounter as any).id);
+        if (isMissingSupabaseResource(updateError)) {
+          return res.json({ success: true, unlimited: true });
+        }
         if (updateError) return res.status(500).json({ error: updateError.message });
       } else {
         const { error: insertError } = await supabaseAdmin
@@ -535,6 +573,9 @@ async function startServer() {
             window_start: start.toISOString(),
             window_end: end.toISOString(),
           });
+        if (isMissingSupabaseResource(insertError)) {
+          return res.json({ success: true, unlimited: true });
+        }
         if (insertError) return res.status(500).json({ error: insertError.message });
       }
 
