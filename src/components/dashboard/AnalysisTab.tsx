@@ -7,6 +7,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import { cn } from '../../lib/utils';
 import { Message, Asset } from '../../types';
+import type { Mt5AnalyzerPayload, Mt5MarketOverviewRow } from '../../mt5/types';
 
 interface AnalysisTabProps {
     messages: Message[];
@@ -16,7 +17,16 @@ interface AnalysisTabProps {
     isLoading: boolean;
     selectedAssets: string[];
     assets: Asset[];
+    marketRows: Mt5MarketOverviewRow[];
     messagesEndRef: React.RefObject<HTMLDivElement | null>;
+    mt5SelectedSymbol: string | null;
+    mt5Analyzer: Mt5AnalyzerPayload | null;
+    mt5Answer: string;
+    mt5Question: string;
+    mt5Loading: boolean;
+    onSelectMt5Symbol: (symbol: string) => void;
+    onChangeMt5Question: (value: string) => void;
+    onAskMt5Question: () => void;
 }
 
 export default function AnalysisTab({
@@ -27,7 +37,16 @@ export default function AnalysisTab({
     isLoading,
     selectedAssets,
     assets,
-    messagesEndRef
+    marketRows,
+    messagesEndRef,
+    mt5SelectedSymbol,
+    mt5Analyzer,
+    mt5Answer,
+    mt5Question,
+    mt5Loading,
+    onSelectMt5Symbol,
+    onChangeMt5Question,
+    onAskMt5Question
 }: AnalysisTabProps) {
     const selectedAssetObjects = assets.filter(a => selectedAssets.includes(a.id));
 
@@ -38,6 +57,52 @@ export default function AnalysisTab({
             animate={{ opacity: 1 }}
             className="h-[calc(100vh-140px)] flex flex-col gap-6"
         >
+            <div className="bg-[#161B22] border border-[#30363D] rounded-2xl p-5">
+                <div className="flex flex-wrap items-center gap-2 mb-3">
+                    {marketRows.slice(0, 20).map((row) => (
+                        <button
+                            key={row.symbol}
+                            onClick={() => onSelectMt5Symbol(row.symbol)}
+                            className={cn(
+                                'px-2.5 py-1 text-[11px] rounded-md border font-semibold',
+                                mt5SelectedSymbol === row.symbol
+                                    ? 'bg-[#00A3FF]/20 border-[#00A3FF]/40 text-[#00A3FF]'
+                                    : 'border-[#30363D] text-[#8B949E] hover:text-white hover:border-[#00A3FF]/30'
+                            )}
+                        >
+                            {row.symbol}
+                        </button>
+                    ))}
+                </div>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div className="bg-[#0D1117] border border-[#30363D] rounded-xl p-4">
+                        <h4 className="text-xs uppercase tracking-wider font-bold text-[#8B949E] mb-3">JSON Context</h4>
+                        <pre className="text-[11px] text-[#C9D1D9] max-h-64 overflow-auto whitespace-pre-wrap">
+                            {mt5Analyzer ? JSON.stringify(mt5Analyzer, null, 2) : 'Seleziona un asset dalla Market Overview per caricare analyzer_[SYMBOL].json'}
+                        </pre>
+                    </div>
+                    <div className="bg-[#0D1117] border border-[#30363D] rounded-xl p-4 flex flex-col gap-3">
+                        <h4 className="text-xs uppercase tracking-wider font-bold text-[#8B949E]">Interactive Analysis (Gemini)</h4>
+                        <textarea
+                            value={mt5Question}
+                            onChange={(event) => onChangeMt5Question(event.target.value)}
+                            placeholder="Perche l'oro ha confidenza 85%?"
+                            className="min-h-24 bg-[#161B22] border border-[#30363D] rounded-lg p-3 text-sm focus:outline-none focus:border-[#00A3FF]"
+                        />
+                        <button
+                            onClick={onAskMt5Question}
+                            disabled={!mt5SelectedSymbol || !mt5Question.trim() || mt5Loading}
+                            className="self-start px-4 py-2 text-xs font-bold uppercase tracking-wider rounded-lg bg-[#00A3FF] text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            {mt5Loading ? 'Analisi in corso...' : 'Chiedi a Gemini'}
+                        </button>
+                        <div className="text-sm text-[#C9D1D9] border border-[#30363D] rounded-lg p-3 min-h-24 bg-[#161B22]">
+                            {mt5Answer || 'La risposta comparira qui.'}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div className="flex-1 flex flex-col min-h-0 bg-[#0D1117] border border-[#30363D] rounded-2xl overflow-hidden shadow-2xl">
                 {/* Chat Header */}
                 <div className="px-6 py-4 bg-[#161B22] border-b border-[#30363D] flex justify-between items-center shrink-0">

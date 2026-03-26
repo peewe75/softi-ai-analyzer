@@ -28,4 +28,13 @@ export interface DataFeed {
     url?: string;
 }
 
+export interface RssFeedItem {
+    id: string;
+    title: string;
+    link: string;
+    pubDate: string;
+    contentSnippet: string;
+    source?: string;
+}
+
 export type Tab = 'overview' | 'analysis' | 'feeds' | 'automation' | 'reports' | 'support' | 'settings';

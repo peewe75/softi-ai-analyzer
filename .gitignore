@@ -2,7 +2,16 @@ node_modules/
 build/
 dist/
 coverage/
+logs/
 .DS_Store
 *.log
 .env*
 !.env.example
+*.ex5
+softi-upload.zip
+.claude/
+skills/
+*.mp4
+*.txt
+report_and_prompt.md.resolved
+.opencode/

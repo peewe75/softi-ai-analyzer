@@ -1,11 +1,17 @@
 import React from 'react';
 import {
-    LifeBuoy, MessageSquare, BookOpen, ExternalLink, ShieldCheck, Mail
+    LifeBuoy, MessageSquare, BookOpen, ExternalLink, ShieldCheck, Mail, BellRing, Check
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { cn } from '../../lib/utils';
+import type { Mt5Notification } from '../../mt5/types';
 
-export default function SupportTab() {
+interface SupportTabProps {
+    notifications: Mt5Notification[];
+    dismissNotification: (id: string) => void;
+}
+
+export default function SupportTab({ notifications, dismissNotification }: SupportTabProps) {
     const supportTickets = [
         { id: 'TKT-8842', subject: 'API Latency Optimization', status: 'Resolved', date: '2024-03-05' },
         { id: 'TKT-8891', subject: 'Custom EA Bridge Config', status: 'Open', date: '2024-03-07' },
@@ -21,8 +27,33 @@ export default function SupportTab() {
             <div className="bg-[#161B22] border border-[#30363D] p-4 rounded-xl flex items-center gap-4">
                 <LifeBuoy size={20} className="text-[#00A3FF]" />
                 <p className="text-xs text-[#8B949E]">
-                    **Support Center** fornisce assistenza tecnica prioritaria per la configurazione dei ponti MT5 e l'ottimizzazione degli algoritmi di analisi.
+                    **Trading Genius (Expert AI assistance)** mostra alert proattivi quando arrivano setup ad alta confidenza in sessioni deboli.
                 </p>
+            </div>
+
+            <div className="bg-[#161B22] border border-[#30363D] rounded-2xl overflow-hidden">
+                <div className="px-6 py-4 border-b border-[#30363D] bg-[#1C2128] flex items-center gap-2">
+                    <BellRing size={16} className="text-[#E3B341]" />
+                    <h3 className="text-sm font-bold uppercase text-[#8B949E] tracking-widest">Proactive Signals</h3>
+                </div>
+                <div className="divide-y divide-[#30363D]">
+                    {notifications.length === 0 ? (
+                        <div className="p-6 text-sm text-[#8B949E]">Nessun avviso attivo.</div>
+                    ) : notifications.map((item) => (
+                        <div key={item.id} className="p-4 flex items-center justify-between gap-4">
+                            <div>
+                                <p className="text-sm text-white">{item.message}</p>
+                                <p className="text-xs text-[#8B949E] mt-1">Confidence: {Math.round(item.confidence_score * 100)}% • Sessione: {item.session_quality_label}</p>
+                            </div>
+                            <button
+                                onClick={() => dismissNotification(item.id)}
+                                className="inline-flex items-center gap-2 text-xs border border-[#238636]/30 text-[#3FB950] bg-[#238636]/10 rounded-lg px-3 py-2 hover:bg-[#238636]/20"
+                            >
+                                <Check size={13} /> Conferma
+                            </button>
+                        </div>
+                    ))}
+                </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

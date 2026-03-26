@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect } from 'react';
-import { io, Socket } from 'socket.io-client';
 import { toPng } from 'html-to-image';
 import jsPDF from 'jspdf';
 import { AnimatePresence } from 'motion/react';
@@ -21,6 +20,8 @@ import AutomationTab from './dashboard/AutomationTab';
 import ReportsTab from './dashboard/ReportsTab';
 import SupportTab from './dashboard/SupportTab';
 import SettingsTab from './dashboard/SettingsTab';
+import { useMt5Bridge } from '../hooks/useMt5Bridge';
+import type { Mt5AnalyzerPayload, Mt5Notification } from '../mt5/types';
 
 const ENTITLEMENT_ALIASES: Record<string, string> = {
     analysis: 'basic_analysis',
@@ -84,7 +85,7 @@ export default function MainDashboard() {
                     const headers: Record<string, string> = {
                         'Content-Type': 'application/json'
                     };
-                        headers['Authorization'] = `Bearer ${token}`;
+                    headers['Authorization'] = `Bearer ${token}`;
 
                     const response = await fetch('/api/auth/sync', {
                         method: 'POST',
@@ -203,30 +204,34 @@ export default function MainDashboard() {
         support: ['premium_signals']
     };
     const [messages, setMessages] = useState<Message[]>([]);
-    const [supportMessages, setSupportMessages] = useState<Message[]>([
-        { id: 'welcome', role: 'assistant', content: "Benvenuto nel supporto finanziario di SOFTI AI. Sono il tuo **Trading Genius**, esperto senior in mercati globali, cripto, fondi assicurativi e trading algoritmico. Come posso assisterti oggi?", timestamp: new Date(), type: 'support' }
-    ]);
-    const [eaLogs, setEaLogs] = useState<Message[]>([]);
     const [input, setInput] = useState('');
-    const [supportInput, setSupportInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
-    const [isConnected, setIsConnected] = useState(false);
     const [selectedAssets, setSelectedAssets] = useState<string[]>(['eurusd', 'xauusd', 'btc']);
     const [activeFeeds, setActiveFeeds] = useState<string[]>(['google']);
-    const [expandedCategories, setExpandedCategories] = useState<Record<string, boolean>>({});
     const [expandedAssetCategories, setExpandedAssetCategories] = useState<string[]>(['Forex']);
-    const [activeAI, setActiveAI] = useState<string>('gemini-pro');
     const [lastUpdate, setLastUpdate] = useState<Date>(() => {
         const cached = localStorage.getItem('softi_last_update');
         return cached ? new Date(cached) : new Date(0);
     });
-    const [quotaError, setQuotaError] = useState<boolean>(false);
-    
+    const {
+        bridgeStatus,
+        marketRows,
+        logs: eaLogs,
+        notifications,
+        startBridge,
+        stopBridge,
+        dismissNotification
+    } = useMt5Bridge();
+    const [toastAlert, setToastAlert] = useState<Mt5Notification | null>(null);
+    const [mt5SelectedSymbol, setMt5SelectedSymbol] = useState<string | null>(null);
+    const [mt5Analyzer, setMt5Analyzer] = useState<Mt5AnalyzerPayload | null>(null);
+    const [mt5Question, setMt5Question] = useState('');
+    const [mt5Answer, setMt5Answer] = useState('');
+    const [mt5Loading, setMt5Loading] = useState(false);
+
     // AI calls are now handled by the backend /api/ai/analyze endpoint
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
-    const supportEndRef = useRef<HTMLDivElement>(null);
-    const socketRef = useRef<Socket | null>(null);
 
     const refreshMarketData = async (isManual = false) => {
         if (isLoading) return;
@@ -237,11 +242,10 @@ export default function MainDashboard() {
         if (!isManual && timeSinceLastUpdate < 120000) return; // 2 minutes
 
         setIsLoading(true);
-        setQuotaError(false);
         try {
             const token = await getToken();
             const allSymbols = assets.map(a => a.symbol).join(', ');
-            
+
             const response = await fetch('/api/ai/analyze', {
                 method: 'POST',
                 headers: {
@@ -258,7 +262,7 @@ export default function MainDashboard() {
             if (!response.ok) throw new Error('Refresh failed');
             const data = await response.json();
             let rawText = data.content || "[]";
-            
+
             const jsonMatch = rawText.match(/\[[\s\S]*\]/);
             if (jsonMatch) rawText = jsonMatch[0];
             const updatedData = JSON.parse(rawText);
@@ -275,7 +279,6 @@ export default function MainDashboard() {
             localStorage.setItem('softi_last_update', updateTime.toISOString());
         } catch (e: any) {
             console.error('Market data refresh failed:', e);
-            if (e.message?.includes('429')) setQuotaError(true);
         } finally {
             setIsLoading(false);
         }
@@ -288,12 +291,28 @@ export default function MainDashboard() {
     }, [lastUpdate, getToken]);
 
     useEffect(() => {
-        const socket = io();
-        socketRef.current = socket;
-        socket.on('connect', () => setIsConnected(true));
-        socket.on('disconnect', () => setIsConnected(false));
-        return () => { socket.disconnect(); };
-    }, []);
+        if (notifications.length === 0) return;
+        setToastAlert(notifications[0]);
+    }, [notifications]);
+
+    useEffect(() => {
+        if (!mt5SelectedSymbol) return;
+        const loadAnalyzer = async () => {
+            try {
+                const response = await fetch(`/api/mt5/analyzer/${mt5SelectedSymbol}`);
+                if (!response.ok) {
+                    setMt5Analyzer(null);
+                    return;
+                }
+                const payload = await response.json();
+                setMt5Analyzer(payload?.analyzer || null);
+            } catch (error) {
+                console.error('Failed to load MT5 analyzer:', error);
+                setMt5Analyzer(null);
+            }
+        };
+        loadAnalyzer();
+    }, [mt5SelectedSymbol]);
 
     useEffect(() => {
         if (!entitlements) {
@@ -320,7 +339,7 @@ export default function MainDashboard() {
 
             const cap = limits.max_assets_per_analysis?.limit_value;
             if (typeof cap === 'number' && cap > 0 && prev.length >= cap) {
-                setLimitNotice(`Asset limit reached: your plan allows up to ${ cap } assets per analysis.`);
+                setLimitNotice(`Asset limit reached: your plan allows up to ${cap} assets per analysis.`);
                 return prev;
             }
 
@@ -333,10 +352,40 @@ export default function MainDashboard() {
         setExpandedAssetCategories(prev => prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat]);
     };
 
+    const openInteractiveAnalysis = (symbol: string) => {
+        setMt5SelectedSymbol(symbol.toUpperCase());
+        setActiveTab('analysis');
+    };
+
+    const askMt5Question = async () => {
+        if (!mt5SelectedSymbol || !mt5Question.trim() || mt5Loading) return;
+        setMt5Loading(true);
+        setMt5Answer('');
+        try {
+            const response = await fetch('/api/mt5/interactive-analysis', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    symbol: mt5SelectedSymbol,
+                    question: mt5Question
+                })
+            });
+
+            if (!response.ok) throw new Error('Interactive analysis failed');
+            const data = await response.json();
+            setMt5Answer(data.answer || 'Nessuna risposta disponibile.');
+        } catch (error) {
+            console.error(error);
+            setMt5Answer('Errore durante l\'analisi interattiva.');
+        } finally {
+            setMt5Loading(false);
+        }
+    };
+
     const generateReport = async (type: 'daily' | 'weekly' | 'monthly') => {
         const cap = limits.max_assets_per_analysis?.limit_value;
         if (typeof cap === 'number' && cap > 0 && selectedAssets.length > cap) {
-            setLimitNotice(`Reduce selected assets to ${ cap } or fewer for this plan.`);
+            setLimitNotice(`Reduce selected assets to ${cap} or fewer for this plan.`);
             return;
         }
 
@@ -375,23 +424,20 @@ export default function MainDashboard() {
         const selectedSymbols = assets.filter(a => selectedAssets.includes(a.id)).map(a => a.symbol).join(', ');
         try {
             const token = await getToken();
-                const response = await fetch('/api/ai/analyze', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                    },
-                    body: JSON.stringify({
-                        type: 'report',
-                        symbols: selectedSymbols,
-                        prompt: `Genera report ${ type } `,
-                        model: "gemini-1.5-pro"
-                    })
-                });
+            const response = await fetch('/api/mt5/reports/generate', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+                body: JSON.stringify({
+                    timeframe: type
+                })
+            });
 
             if (!response.ok) throw new Error('Report generation failed');
             const data = await response.json();
-            const msg: Message = { id: Date.now().toString(), role: 'assistant', content: data.content || "Errore.", timestamp: new Date(), type: 'report' };
+            const msg: Message = { id: Date.now().toString(), role: 'assistant', content: data.markdown || "Errore.", timestamp: new Date(), type: 'report' };
             setMessages(prev => [...prev, msg]);
         } catch (e) {
             console.error(e);
@@ -405,7 +451,7 @@ export default function MainDashboard() {
 
         const cap = limits.max_assets_per_analysis?.limit_value;
         if (typeof cap === 'number' && cap > 0 && selectedAssets.length > cap) {
-            setLimitNotice(`Reduce selected assets to ${ cap } or fewer for this plan.`);
+            setLimitNotice(`Reduce selected assets to ${cap} or fewer for this plan.`);
             return;
         }
 
@@ -462,12 +508,12 @@ export default function MainDashboard() {
 
             if (!response.ok) throw new Error('Analysis failed');
             const data = await response.json();
-            const msg: Message = { 
-                id: Date.now().toString(), 
-                role: 'assistant', 
-                content: data.content || "Errore.", 
-                timestamp: new Date(), 
-                type: 'chat' 
+            const msg: Message = {
+                id: Date.now().toString(),
+                role: 'assistant',
+                content: data.content || "Errore.",
+                timestamp: new Date(),
+                type: 'chat'
             };
             setMessages(prev => [...prev, msg]);
         } catch (e) {
@@ -480,10 +526,10 @@ export default function MainDashboard() {
     const exportToPDF = async (elementId: string, title: string = 'Report') => {
         const element = document.getElementById(elementId);
         if (!element) return;
-        
+
         setIsLoading(true);
         try {
-            const dataUrl = await toPng(element, { 
+            const dataUrl = await toPng(element, {
                 backgroundColor: '#0D1117',
                 style: {
                     borderRadius: '0'
@@ -492,9 +538,9 @@ export default function MainDashboard() {
             const pdf = new jsPDF('p', 'mm', 'a4');
             const imgWidth = 210;
             const imgHeight = (element.offsetHeight * imgWidth) / element.offsetWidth;
-            
+
             pdf.addImage(dataUrl, 'PNG', 0, 0, imgWidth, imgHeight);
-            pdf.save(`${ title.toLowerCase().replace(/\s+/g, '_') }.pdf`);
+            pdf.save(`${title.toLowerCase().replace(/\s+/g, '_')}.pdf`);
         } catch (e) {
             console.error('PDF Export failed:', e);
         } finally {
@@ -508,12 +554,26 @@ export default function MainDashboard() {
             <main className="flex-1 flex flex-col min-w-0 bg-[#0D1117]">
                 <TopBar
                     isLoading={isLoading}
-                    isConnected={isConnected}
+                    isConnected={bridgeStatus.active}
                     refreshMarketData={refreshMarketData}
                     lastUpdate={lastUpdate}
                     userRole={userRole}
                 />
                 <div className="flex-1 overflow-y-auto min-w-0 p-6">
+                    {toastAlert && (
+                        <div className="mb-4 rounded-lg border border-[#E3B341]/40 bg-[#E3B341]/10 px-4 py-3 text-xs text-[#F2CC60] flex items-center justify-between gap-3">
+                            <span>{toastAlert.message}</span>
+                            <button
+                                onClick={() => {
+                                    dismissNotification(toastAlert.id);
+                                    setToastAlert(null);
+                                }}
+                                className="px-2 py-1 rounded bg-[#0D1117] border border-[#30363D] text-[#E1E4E8]"
+                            >
+                                Conferma
+                            </button>
+                        </div>
+                    )}
                     {limitNotice && (
                         <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200">
                             {limitNotice}
@@ -523,8 +583,10 @@ export default function MainDashboard() {
                         {activeTab === 'overview' && (
                             <OverviewTab
                                 assets={assets}
+                                marketRows={marketRows}
                                 selectedAssets={selectedAssets}
                                 toggleAssetSelection={toggleAssetSelection}
+                                onOpenInteractiveAnalysis={openInteractiveAnalysis}
                                 isLoading={isLoading}
                                 lastUpdate={lastUpdate}
                                 expandedAssetCategories={expandedAssetCategories}
@@ -540,19 +602,36 @@ export default function MainDashboard() {
                                 isLoading={isLoading}
                                 selectedAssets={selectedAssets}
                                 assets={assets}
+                                marketRows={marketRows}
                                 messagesEndRef={messagesEndRef}
+                                mt5SelectedSymbol={mt5SelectedSymbol}
+                                mt5Analyzer={mt5Analyzer}
+                                mt5Answer={mt5Answer}
+                                mt5Question={mt5Question}
+                                mt5Loading={mt5Loading}
+                                onSelectMt5Symbol={setMt5SelectedSymbol}
+                                onChangeMt5Question={setMt5Question}
+                                onAskMt5Question={askMt5Question}
                             />
                         )}
                         {activeTab === 'feeds' && (
                             <FeedsTab dataFeeds={DATA_FEEDS} activeFeeds={activeFeeds} setActiveFeeds={setActiveFeeds} />
                         )}
                         {activeTab === 'automation' && (
-                            <AutomationTab eaLogs={eaLogs} exportToPDF={exportToPDF} />
+                            <AutomationTab
+                                bridgeStatus={bridgeStatus}
+                                eaLogs={eaLogs}
+                                exportToPDF={exportToPDF}
+                                startBridge={startBridge}
+                                stopBridge={stopBridge}
+                            />
                         )}
                         {activeTab === 'reports' && (
                             <ReportsTab messages={messages} isLoading={isLoading} generateReport={generateReport} exportToPDF={exportToPDF} />
                         )}
-                        {activeTab === 'support' && <SupportTab />}
+                        {activeTab === 'support' && (
+                            <SupportTab notifications={notifications} dismissNotification={dismissNotification} />
+                        )}
                         {activeTab === 'settings' && <SettingsTab />}
                     </AnimatePresence>
                 </div>

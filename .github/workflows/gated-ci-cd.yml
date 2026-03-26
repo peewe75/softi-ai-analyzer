@@ -1,0 +1,92 @@
+name: Gated CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+  integration-smoke:
+    runs-on: ubuntu-latest
+    needs: lint-and-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start server
+        run: nohup npm run dev > server.log 2>&1 &
+
+      - name: Wait for health endpoint
+        run: |
+          for i in {1..30}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/api/health)
+            if [ "$STATUS" = "200" ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Server did not become healthy"
+          cat server.log
+          exit 1
+
+      - name: Admin endpoints respond JSON and expected auth status
+        run: |
+          STATUS_USERS=$(curl -s -o /tmp/users.out -w "%{http_code}" http://127.0.0.1:3000/api/admin/users)
+          STATUS_ROLE_PATCH=$(curl -s -o /tmp/role_patch.out -w "%{http_code}" -X PATCH http://127.0.0.1:3000/api/admin/users/demo/role)
+          STATUS_ROLE_POST=$(curl -s -o /tmp/role_post.out -w "%{http_code}" -X POST http://127.0.0.1:3000/api/admin/users/demo/role)
+          STATUS_ENTITLEMENTS=$(curl -s -o /tmp/entitlements.out -w "%{http_code}" http://127.0.0.1:3000/api/me/entitlements)
+
+          [ "$STATUS_USERS" = "401" ] || (echo "Unexpected /api/admin/users status: $STATUS_USERS" && cat /tmp/users.out && exit 1)
+          [ "$STATUS_ROLE_PATCH" = "401" ] || (echo "Unexpected PATCH role status: $STATUS_ROLE_PATCH" && cat /tmp/role_patch.out && exit 1)
+          [ "$STATUS_ROLE_POST" = "401" ] || (echo "Unexpected POST role status: $STATUS_ROLE_POST" && cat /tmp/role_post.out && exit 1)
+          [ "$STATUS_ENTITLEMENTS" = "401" ] || (echo "Unexpected /api/me/entitlements status: $STATUS_ENTITLEMENTS" && cat /tmp/entitlements.out && exit 1)
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: integration-smoke
+    environment:
+      name: staging
+    steps:
+      - name: Placeholder staging deploy
+        run: echo "Deploy to staging here"
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: deploy-staging
+    environment:
+      name: production
+    steps:
+      - name: Placeholder production deploy
+        run: echo "Deploy to production here after manual approval"

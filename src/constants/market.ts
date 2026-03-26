@@ -78,6 +78,7 @@ export const ASSET_DATABASE: Asset[] = [
 ];
 
 export const DATA_FEEDS: DataFeed[] = [
+    { id: 'news-events', name: 'News & Events', provider: 'RSS Wire', type: 'free', status: 'active', description: 'Live macro headlines and sentiment pulse from financial RSS feeds.' },
     { id: 'google', name: 'Google Finance', provider: 'Google', type: 'free', status: 'active', description: 'Real-time market data via AI Grounding.' },
     { id: 'yahoo', name: 'Yahoo Finance', provider: 'Yahoo', type: 'free', status: 'active', description: 'Historical and fundamental data feed.' },
     { id: 'alphavantage', name: 'Alpha Vantage', provider: 'AV', type: 'paid', status: 'inactive', description: 'Premium API for global stocks and FX.' },

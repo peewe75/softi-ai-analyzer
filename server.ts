@@ -11,7 +11,9 @@ import { supabaseAdmin } from './lib/supabase';
 import { syncClerkUser } from './lib/clerk-sync.js';
 import { resolveEffectiveEntitlements } from './lib/entitlements.js';
 import { createBillingRouter } from './server/routes/billing.js';
+import { createFeedsRouter } from './server/routes/feeds.js';
 import crypto from 'crypto';
+import { initMt5Bridge } from './server/mt5/bridge.js';
 
 type ProfileRole = 'owner' | 'admin' | 'user';
 type CanonicalRole = 'admin' | 'user';
@@ -54,6 +56,8 @@ async function startServer() {
 
   app.use(express.json());
   app.use(express.text());
+
+  initMt5Bridge({ app, io, ai, supabaseAdmin });
 
   // Middleware Clerk Core — custom implementation to support clockSkewInMs
   // (ClerkExpressWithAuth v4 silently drops this option internally)
@@ -667,7 +671,7 @@ async function startServer() {
   // Admin Super-Analysis (Aggregation)
   app.get('/api/admin/super-analysis', clerkMiddleware, requireAdminOrOwner, async (req: AuthenticatedRequest, res) => {
     try {
-      const { profile } = (req as any).requesterProfile;
+      const requester = (req as any).requesterProfile;
 
       // 1. Fetch all unique analyses from the last 24 hours
       const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -677,38 +681,56 @@ async function startServer() {
         .gt('created_at', yesterday);
 
       if (archiveError) return res.status(500).json({ error: archiveError.message });
+
       if (!archives || archives.length === 0) {
-        return res.json({ result: "Nessun dato recente da aggregare per la super-analisi." });
+        return res.json({ result: "Nessun dato recente (ultime 24h) disponibile nel database per generare la super-analisi." });
       }
 
-      // 2. Prepare context for Gemini
-      const dataForAggregation = archives.map((a: any) => ({
+      // 2. Prepare context for Gemini - focus on report and analysis types
+      const relevantArchives = archives.filter((a: any) => a.target_type !== 'market_data' || archives.length < 20);
+
+      const dataForAggregation = relevantArchives.slice(0, 30).map((a: any) => ({
         subject: a.target_id,
         type: a.target_type,
-        summary: a.content.substring(0, 1000) // Truncate to avoid context limit if many
+        timestamp: a.created_at,
+        // Ensure we don't send massive blobs if they are huge, but enough for context
+        content_preview: a.content.length > 2000 ? a.content.substring(0, 2000) + "..." : a.content
       }));
 
-      const aggregationPrompt = `Sei un supervisore AI. Ti fornisco un set di analisi finanziarie generate nelle ultime 24 ore dai nostri utenti. 
-      Il tuo compito è creare una "Super Analisi" macroscopica che evidenzi i trend principali, i punti di convergenza tra diversi asset e i rischi sistemici rilevati.
+      const serverModel = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+
+      const aggregationPrompt = `Sei un supervisore AI di SOFTI AI. Ti fornisco un set di analisi finanziarie e report generati nelle ultime 24 ore dai nostri utenti. 
+      Il tuo compito è creare una "Super Analisi" macroscopica che sintetizzi l'attività recente.
       
-      DATI ANALISI:
+      DATI ANALISI (Ultime 24h):
       ${JSON.stringify(dataForAggregation)}
       
-      Formato richiesto:
-      - Sentiment Globale (Bullish/Bearish/Neutral)
-      - Correlazioni rilevanti tra asset analizzati
-      - Opportunità macroscopiche
-      - Rating di rischio complessivo
+      ISTRUZIONI:
+      Crea un report di alto livello per l'amministratore che includa:
+      1. Sentiment Globale (Bullish/Bearish/Neutral) basato sulla prevalenza delle analisi.
+      2. Asset più "caldi": Quali simboli sono stati analizzati più spesso o hanno mostrato segnali forti?
+      3. Correlazioni e Macro-Trend: Ci sono temi ricorrenti (es. forza del Dollaro, crollo delle crypto, rotazione settoriale)?
+      4. Riassunto Esecutivo: 3-4 punti chiave per chi gestisce la piattaforma.
       
-      Rispondi in italiano professionale.`;
+      Rispondi in formato professionale ed elegante (Markdown), in lingua italiana.`;
 
       // 3. Call Gemini for aggregation
+      console.log(`[SUPER-ANALYSIS] Aggregating ${dataForAggregation.length} archives using ${serverModel}...`);
+
       const response = await ai.models.generateContent({
-        model: "gemini-1.5-pro",
+        model: serverModel,
         contents: aggregationPrompt,
       });
 
-      res.json({ result: response.text || "Errore nella generazione della super-analisi." });
+      const resultText = response.text || "La generazione della super-analisi non ha restituito testo.";
+
+      // 4. Log the action (Optional: could store this in a special super_analysis_logs table)
+      await writeAuditLog(requester.id, 'admin.super_analysis.generated', 'system', {
+        archives_processed: archives.length,
+        model_used: serverModel
+      });
+
+      res.json({ result: resultText });
     } catch (error: any) {
       console.error('[SUPER ANALYSIS ERROR]', error);
       res.status(500).json({ error: error.message });
@@ -1461,6 +1483,7 @@ async function startServer() {
   });
 
   // Billing
+  app.use('/api/feeds', createFeedsRouter());
   app.use('/api/billing', createBillingRouter(clerkMiddleware));
 
   // Static Files
