@@ -639,16 +639,9 @@ export default function MainDashboard() {
                                 isLoading={isLoading}
                                 selectedAssets={selectedAssets}
                                 assets={assets}
-                                marketRows={marketRows}
+                                toggleAssetSelection={toggleAssetSelection}
+                                limitNotice={limitNotice}
                                 messagesEndRef={messagesEndRef}
-                                mt5SelectedSymbol={mt5SelectedSymbol}
-                                mt5Analyzer={mt5Analyzer}
-                                mt5Answer={mt5Answer}
-                                mt5Question={mt5Question}
-                                mt5Loading={mt5Loading}
-                                onSelectMt5Symbol={setMt5SelectedSymbol}
-                                onChangeMt5Question={setMt5Question}
-                                onAskMt5Question={askMt5Question}
                             />
                         )}
                         {activeTab === 'feeds' && (
