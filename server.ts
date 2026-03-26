@@ -212,15 +212,8 @@ async function startServer() {
     }
   };
 
-  const writeAuditLog = async (adminId: string, action: string, targetId: string, details: Record<string, unknown>) => {
-    await supabaseAdmin
-      .from('audit_logs')
-      .insert({
-        admin_id: adminId,
-        action,
-        target_id: targetId,
-        details,
-      });
+  const writeAuditLog = async (_adminId: string, _action: string, _targetId: string, _details: Record<string, unknown>) => {
+    // Audit logging via billing_events is managed centrally in BCS; local writes skipped.
   };
 
   const normalizeRole = (input: unknown): CanonicalRole | null => {
@@ -266,57 +259,50 @@ async function startServer() {
   };
 
   const getActivePlanIdForProfile = async (profileId: string) => {
-    const { data: currentSubscription, error: subscriptionError } = await supabaseAdmin
-      .from('subscriptions')
-      .select('plan_id')
+    const { data: grant, error: grantError } = await supabaseAdmin
+      .from('user_apps')
+      .select('plan, expires_at')
       .eq('user_id', profileId)
-      .eq('status', 'active')
-      .order('created_at', { ascending: false })
-      .limit(1)
+      .eq('app_id', 'softi')
       .maybeSingle();
 
-    if (isMissingSupabaseResource(subscriptionError)) {
+    if (isMissingSupabaseResource(grantError)) {
       return null;
     }
 
-    let planId = (currentSubscription as any)?.plan_id || null;
-    if (!planId) {
-      const { data: freePlan, error: freePlanError } = await supabaseAdmin
-        .from('plans')
-        .select('id')
-        .eq('name', 'free')
-        .maybeSingle();
-      if (isMissingSupabaseResource(freePlanError)) {
-        return null;
-      }
-      planId = (freePlan as any)?.id || null;
+    if (!grant) return 'free';
+
+    // If expired, fall back to free
+    if (grant.expires_at && new Date(grant.expires_at) < new Date()) {
+      return 'free';
     }
-    return planId as string | null;
+
+    return (grant.plan as string) || 'free';
   };
 
   const resolveEffectiveLimits = async (profileId: string, planId: string | null): Promise<Record<string, EffectiveLimit>> => {
     const result = new Map<string, EffectiveLimit>();
 
-    if (planId) {
-      const { data: planLimits, error: planLimitsError } = await supabaseAdmin
-        .from('plan_limits')
-        .select('limit_key, limit_value, window')
-        .eq('plan_id', planId);
+    const effectivePlan = planId || 'free';
+    const { data: planRow, error: planLimitsError } = await supabaseAdmin
+      .from('app_billing_plans')
+      .select('limits')
+      .eq('app_id', 'softi')
+      .eq('plan_code', effectivePlan)
+      .maybeSingle();
 
-      if (isMissingSupabaseResource(planLimitsError)) {
-        return {};
-      }
+    if (isMissingSupabaseResource(planLimitsError)) {
+      return {};
+    }
 
-      if (!planLimitsError && planLimits) {
-        for (const row of planLimits as any[]) {
-          const key = String(row.limit_key || '');
-          if (!key) continue;
-          result.set(key, {
-            limit_key: key,
-            limit_value: typeof row.limit_value === 'number' ? row.limit_value : row.limit_value === null ? null : Number(row.limit_value),
-            window: normalizeLimitWindow(row.window),
-          });
-        }
+    if (!planLimitsError && planRow?.limits) {
+      for (const [key, val] of Object.entries(planRow.limits as Record<string, unknown>)) {
+        if (!key) continue;
+        result.set(key, {
+          limit_key: key,
+          limit_value: typeof val === 'number' ? val : val === null ? null : Number(val),
+          window: 'daily',
+        });
       }
     }
 
@@ -760,36 +746,20 @@ async function startServer() {
         return res.status(500).json({ error: profileError.message });
       }
 
-      const profileIds = (profiles || []).map((p: any) => p.id);
-      const subscriptionsByUser = new Map<string, { plan_name: string | null; subscription_status: string | null }>();
+      // Get user_apps for softi from BCS
+      const { data: grants } = await supabaseAdmin
+        .from('user_apps')
+        .select('user_id, plan, expires_at')
+        .eq('app_id', 'softi');
 
-      if (profileIds.length > 0) {
-        const { data: subscriptions, error: subError } = await supabaseAdmin
-          .from('subscriptions')
-          .select('user_id, status, created_at, plans(name)')
-          .in('user_id', profileIds)
-          .order('created_at', { ascending: false });
-
-        if (subError) {
-          return res.status(500).json({ error: subError.message });
-        }
-
-        for (const sub of subscriptions || []) {
-          const userId = (sub as any).user_id as string;
-          if (subscriptionsByUser.has(userId)) continue;
-          subscriptionsByUser.set(userId, {
-            plan_name: (sub as any).plans?.name ?? null,
-            subscription_status: (sub as any).status ?? null,
-          });
-        }
-      }
+      const grantsByUser = new Map((grants ?? []).map((g: any) => [g.user_id, g]));
 
       const users = (profiles || []).map((profile: any) => {
-        const sub = subscriptionsByUser.get(profile.id);
+        const grant = grantsByUser.get(profile.id);
         return {
           ...profile,
-          plan_name: sub?.plan_name ?? 'free',
-          subscription_status: sub?.subscription_status ?? 'active',
+          plan_name: grant?.plan ?? 'free',
+          subscription_status: grant ? (grant.expires_at && new Date(grant.expires_at) < new Date() ? 'expired' : 'active') : 'inactive',
         };
       });
 
@@ -929,7 +899,7 @@ async function startServer() {
       const requester = (req as any).requesterProfile;
       const userId = req.params.userId;
       const planName = String(req.body?.plan_name || '').toLowerCase();
-      const allowedPlans = ['free', 'lite', 'pro', 'premium'];
+      const allowedPlans = ['free', 'lite', 'pro', 'premium', 'monthly'];
 
       if (!allowedPlans.includes(planName)) {
         return res.status(422).json({ error: 'Invalid plan_name' });
@@ -945,57 +915,19 @@ async function startServer() {
         return res.status(404).json({ error: 'User profile not found' });
       }
 
-      const { data: targetPlan, error: planError } = await supabaseAdmin
-        .from('plans')
-        .select('id, name')
-        .eq('name', planName)
-        .single();
+      const { error: upsertError } = await supabaseAdmin
+        .from('user_apps')
+        .upsert({ user_id: userId, app_id: 'softi', plan: planName, updated_at: new Date().toISOString() }, { onConflict: 'user_id,app_id' });
 
-      if (planError || !targetPlan) {
-        return res.status(404).json({ error: 'Plan not found' });
-      }
-
-      const { data: currentSub } = await supabaseAdmin
-        .from('subscriptions')
-        .select('id, plan_id, status')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (currentSub?.id) {
-        const { error: updateSubError } = await supabaseAdmin
-          .from('subscriptions')
-          .update({
-            plan_id: targetPlan.id,
-            status: 'active',
-            current_period_start: new Date().toISOString(),
-          })
-          .eq('id', currentSub.id);
-
-        if (updateSubError) {
-          return res.status(500).json({ error: updateSubError.message });
-        }
-      } else {
-        const { error: createSubError } = await supabaseAdmin
-          .from('subscriptions')
-          .insert({
-            user_id: userId,
-            plan_id: targetPlan.id,
-            status: 'active',
-            current_period_start: new Date().toISOString(),
-          });
-
-        if (createSubError) {
-          return res.status(500).json({ error: createSubError.message });
-        }
+      if (upsertError) {
+        return res.status(500).json({ error: upsertError.message });
       }
 
       await writeAuditLog(requester.id, 'admin.user.subscription.updated', userId, {
         plan_name: planName,
       });
 
-      res.json({ success: true, user_id: userId, plan_name: planName });
+      res.json({ success: true, plan_name: planName });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -1006,38 +938,17 @@ async function startServer() {
 
   app.get('/api/admin/summary', clerkMiddleware, requireAdminOrOwner, async (_req, res) => {
     try {
-      const [{ count: totalUsers, error: totalUsersError }, { data: subscriptions, error: subError }, { count: pendingSupport, error: pendingSupportError }] = await Promise.all([
+      const [
+        { count: totalUsers },
+        { data: activeGrants },
+      ] = await Promise.all([
         supabaseAdmin.from('profiles').select('*', { count: 'exact', head: true }),
-        supabaseAdmin
-          .from('subscriptions')
-          .select('status, plans(name)')
-          .eq('status', 'active'),
-        supabaseAdmin.from('audit_logs').select('*', { count: 'exact', head: true }).eq('action', 'support.ticket.pending'),
+        supabaseAdmin.from('user_apps').select('user_id').eq('app_id', 'softi').eq('plan', 'monthly'),
       ]);
-
-      if (totalUsersError || subError || pendingSupportError) {
-        return res.status(500).json({
-          error: totalUsersError?.message || subError?.message || pendingSupportError?.message,
-        });
-      }
-
-      let activePro = 0;
-      for (const row of subscriptions || []) {
-        const name = (row as any).plans?.name;
-        if (name === 'pro' || name === 'premium') {
-          activePro += 1;
-        }
-      }
-
+      const active_pro = activeGrants?.length ?? 0;
       const cpuUsage = process.cpuUsage();
-      const systemLoad = Number((((cpuUsage.user + cpuUsage.system) / 1000000) % 100).toFixed(1));
-
-      res.json({
-        total_users: totalUsers || 0,
-        active_pro: activePro,
-        system_load: systemLoad,
-        pending_support: pendingSupport || 0,
-      });
+      const system_load = Math.round((cpuUsage.user / 1e6) * 10) / 10;
+      res.json({ total_users: totalUsers ?? 0, active_pro, system_load, pending_support: 0 });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -1049,16 +960,21 @@ async function startServer() {
       const limit = Number.isFinite(limitParam) ? Math.max(1, Math.min(limitParam, 100)) : 20;
 
       const { data: logs, error } = await supabaseAdmin
-        .from('audit_logs')
-        .select('id, admin_id, action, target_id, details, created_at')
-        .order('created_at', { ascending: false })
+        .from('billing_events')
+        .select('id, event_type, payload, processed_at')
+        .order('processed_at', { ascending: false })
         .limit(limit);
 
-      if (error) {
-        return res.status(500).json({ error: error.message });
-      }
-
-      res.json(logs || []);
+      if (error) return res.status(500).json({ error: error.message });
+      const mapped = (logs || []).map((log: any) => ({
+        id: log.id,
+        admin_id: 'system',
+        action: log.event_type,
+        target_id: log.payload?.data?.object?.customer ?? '',
+        details: log.payload,
+        created_at: log.processed_at,
+      }));
+      res.json(mapped);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -1084,42 +1000,19 @@ async function startServer() {
   app.get('/api/admin/plans', clerkMiddleware, requireAdminOrOwner, async (_req, res) => {
     try {
       const { data: plans, error: plansError } = await supabaseAdmin
-        .from('plans')
-        .select('id, name, description, created_at')
-        .order('name', { ascending: true });
+        .from('app_billing_plans')
+        .select('plan_code, app_id, billing_type, features, limits, trial_days, is_active')
+        .eq('app_id', 'softi')
+        .order('plan_code', { ascending: true });
 
-      if (plansError) {
-        return res.status(500).json({ error: plansError.message });
-      }
-
-      const { data: mappings, error: mappingsError } = await supabaseAdmin
-        .from('plan_entitlements')
-        .select('plan_id, entitlements(id, name, description)');
-
-      if (mappingsError) {
-        return res.status(500).json({ error: mappingsError.message });
-      }
-
-      const entitlementsByPlan = new Map<string, Array<{ id: string; name: string; description: string | null }>>();
-      for (const row of mappings || []) {
-        const planId = (row as any).plan_id as string;
-        const entitlement = (row as any).entitlements;
-        if (!entitlement || !planId) continue;
-        const existing = entitlementsByPlan.get(planId) || [];
-        existing.push({
-          id: entitlement.id,
-          name: entitlement.name,
-          description: entitlement.description || null,
-        });
-        entitlementsByPlan.set(planId, existing);
-      }
-
-      const payload = (plans || []).map((plan: any) => ({
-        ...plan,
-        entitlements: entitlementsByPlan.get(plan.id) || [],
+      if (plansError) return res.status(500).json({ error: plansError.message });
+      const mapped = (plans || []).map((p: any) => ({
+        id: p.plan_code,
+        name: p.plan_code === 'free' ? 'Gratuito' : p.plan_code === 'monthly' ? 'Mensile Pro' : p.plan_code,
+        description: p.billing_type,
+        entitlements: (p.features ?? []).map((f: string) => ({ id: f, name: f })),
       }));
-
-      res.json(payload);
+      res.json(mapped);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -1142,147 +1035,42 @@ async function startServer() {
 
       const uniqueEntitlementKeys = Array.from(new Set(entitlementKeys));
 
+      // Fetch plan from BCS app_billing_plans
       const { data: plan, error: planError } = await supabaseAdmin
-        .from('plans')
-        .select('id, name')
-        .eq('id', planId)
-        .single();
+        .from('app_billing_plans')
+        .select('plan_code')
+        .eq('app_id', 'softi')
+        .eq('plan_code', planId)
+        .maybeSingle();
 
       if (planError || !plan) {
         return res.status(404).json({ error: 'Plan not found' });
       }
 
-      const { data: allEntitlements, error: allEntitlementsError } = await supabaseAdmin
-        .from('entitlements')
-        .select('id, name');
+      // Update features array on app_billing_plans
+      const { error: updateError } = await supabaseAdmin
+        .from('app_billing_plans')
+        .update({ features: uniqueEntitlementKeys })
+        .eq('app_id', 'softi')
+        .eq('plan_code', planId);
 
-      if (allEntitlementsError) {
-        return res.status(500).json({ error: allEntitlementsError.message });
-      }
-
-      const entitlementByKey = new Map<string, { id: string; name: string }>();
-      for (const row of allEntitlements || []) {
-        entitlementByKey.set((row as any).name, row as any);
-      }
-
-      const invalidKeys = uniqueEntitlementKeys.filter((key) => !entitlementByKey.has(key));
-      if (invalidKeys.length > 0) {
-        return res.status(422).json({ error: 'Invalid entitlement_keys', invalid_keys: invalidKeys });
-      }
-
-      const { data: existingMappings, error: existingMappingsError } = await supabaseAdmin
-        .from('plan_entitlements')
-        .select('entitlements(id, name)')
-        .eq('plan_id', planId);
-
-      if (existingMappingsError) {
-        return res.status(500).json({ error: existingMappingsError.message });
-      }
-
-      const previousEntitlementKeys = Array.from(new Set((existingMappings || [])
-        .map((row: any) => row.entitlements?.name)
-        .filter((value: unknown): value is string => typeof value === 'string' && value.length > 0)));
-
-      let activeSubscribers: Array<{ user_id: string }> = [];
-      if (applyScope === 'new_only') {
-        const { data: subs, error: subsError } = await supabaseAdmin
-          .from('subscriptions')
-          .select('user_id')
-          .eq('plan_id', planId)
-          .eq('status', 'active');
-
-        if (subsError) {
-          return res.status(500).json({ error: subsError.message });
-        }
-
-        activeSubscribers = (subs || []) as Array<{ user_id: string }>;
-      }
-
-      const { error: deleteError } = await supabaseAdmin
-        .from('plan_entitlements')
-        .delete()
-        .eq('plan_id', planId);
-
-      if (deleteError) {
-        return res.status(500).json({ error: deleteError.message });
-      }
-
-      if (uniqueEntitlementKeys.length > 0) {
-        const rows = uniqueEntitlementKeys.map((key) => ({
-          plan_id: planId,
-          entitlement_id: entitlementByKey.get(key)!.id,
-        }));
-        const { error: insertError } = await supabaseAdmin
-          .from('plan_entitlements')
-          .insert(rows);
-
-        if (insertError) {
-          return res.status(500).json({ error: insertError.message });
-        }
-      }
-
-      let preservedUsers = 0;
-      if (applyScope === 'new_only' && activeSubscribers.length > 0) {
-        const previousSet = new Set(previousEntitlementKeys);
-        const nextSet = new Set(uniqueEntitlementKeys);
-        const keepEnabled = Array.from(previousSet).filter((key) => !nextSet.has(key));
-        const forceDisabled = Array.from(nextSet).filter((key) => !previousSet.has(key));
-
-        const overrideRows: Array<{ profile_id: string; entitlement_id: string; enabled: boolean }> = [];
-
-        for (const subscription of activeSubscribers) {
-          for (const key of keepEnabled) {
-            const entitlement = entitlementByKey.get(key);
-            if (!entitlement) continue;
-            overrideRows.push({
-              profile_id: subscription.user_id,
-              entitlement_id: entitlement.id,
-              enabled: true,
-            });
-          }
-
-          for (const key of forceDisabled) {
-            const entitlement = entitlementByKey.get(key);
-            if (!entitlement) continue;
-            overrideRows.push({
-              profile_id: subscription.user_id,
-              entitlement_id: entitlement.id,
-              enabled: false,
-            });
-          }
-        }
-
-        if (overrideRows.length > 0) {
-          const { error: overrideError } = await supabaseAdmin
-            .from('user_entitlement_overrides')
-            .upsert(overrideRows, { onConflict: 'profile_id,entitlement_id' });
-
-          if (overrideError) {
-            return res.status(500).json({
-              error: overrideError.message,
-              hint: 'user_entitlement_overrides table or constraints may be missing. Apply migration before using apply_scope=new_only.',
-            });
-          }
-        }
-
-        preservedUsers = activeSubscribers.length;
+      if (updateError) {
+        return res.status(500).json({ error: updateError.message });
       }
 
       await writeAuditLog(requester.id, 'admin.plan.entitlements.updated', planId, {
-        plan_name: plan.name,
+        plan_name: plan.plan_code,
         apply_scope: applyScope,
-        previous_entitlement_keys: previousEntitlementKeys,
         new_entitlement_keys: uniqueEntitlementKeys,
-        affected_active_users: preservedUsers,
       });
 
       res.json({
         success: true,
         plan_id: planId,
-        plan_name: plan.name,
+        plan_name: plan.plan_code,
         apply_scope: applyScope,
         entitlement_keys: uniqueEntitlementKeys,
-        affected_active_users: preservedUsers,
+        affected_active_users: 0,
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -1313,19 +1101,21 @@ async function startServer() {
     try {
       const planId = req.params.planId;
       const { data, error } = await supabaseAdmin
-        .from('plan_limits')
-        .select('plan_id, limit_key, limit_value, window')
-        .eq('plan_id', planId)
-        .order('limit_key', { ascending: true });
+        .from('app_billing_plans')
+        .select('limits')
+        .eq('app_id', 'softi')
+        .eq('plan_code', planId)
+        .maybeSingle();
 
-      if (error) {
-        return res.status(500).json({
-          error: error.message,
-          hint: 'Ensure plan_limits table exists before using limits management.',
-        });
-      }
-
-      res.json(data || []);
+      if (error) return res.status(500).json({ error: error.message });
+      const limits = data?.limits ?? {};
+      const result = Object.entries(limits).map(([key, val]: [string, any]) => ({
+        plan_id: planId,
+        limit_key: key,
+        limit_value: typeof val === 'number' ? val : null,
+        window: 'daily',
+      }));
+      res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -1342,11 +1132,13 @@ async function startServer() {
         return res.status(422).json({ error: 'Invalid apply_scope' });
       }
 
+      // Fetch plan from BCS app_billing_plans
       const { data: plan, error: planError } = await supabaseAdmin
-        .from('plans')
-        .select('id, name')
-        .eq('id', planId)
-        .single();
+        .from('app_billing_plans')
+        .select('plan_code')
+        .eq('app_id', 'softi')
+        .eq('plan_code', planId)
+        .maybeSingle();
 
       if (planError || !plan) {
         return res.status(404).json({ error: 'Plan not found' });
@@ -1378,130 +1170,35 @@ async function startServer() {
         });
       }
 
-      const { data: oldLimitRows, error: oldLimitsError } = await supabaseAdmin
-        .from('plan_limits')
-        .select('limit_key, limit_value, window')
-        .eq('plan_id', planId);
-
-      if (oldLimitsError) {
-        return res.status(500).json({
-          error: oldLimitsError.message,
-          hint: 'Ensure plan_limits table exists before using limits management.',
-        });
+      // Build JSONB limits object and update app_billing_plans
+      const limitsJsonb: Record<string, number | null> = {};
+      for (const row of normalizedLimits) {
+        limitsJsonb[row.limit_key] = row.limit_value;
       }
 
-      const previousByKey = new Map<string, { limit_value: number | null; window: LimitWindow }>();
-      for (const row of oldLimitRows || []) {
-        previousByKey.set((row as any).limit_key, {
-          limit_value: (row as any).limit_value,
-          window: normalizeLimitWindow((row as any).window),
-        });
-      }
+      const { error: updateError } = await supabaseAdmin
+        .from('app_billing_plans')
+        .update({ limits: limitsJsonb })
+        .eq('app_id', 'softi')
+        .eq('plan_code', planId);
 
-      const { error: deleteError } = await supabaseAdmin
-        .from('plan_limits')
-        .delete()
-        .eq('plan_id', planId);
-      if (deleteError) {
-        return res.status(500).json({ error: deleteError.message });
-      }
-
-      if (normalizedLimits.length > 0) {
-        const { error: insertError } = await supabaseAdmin
-          .from('plan_limits')
-          .insert(normalizedLimits);
-        if (insertError) {
-          return res.status(500).json({
-            error: insertError.message,
-            hint: 'Ensure plan_limits table exists before using limits management.',
-          });
-        }
-      }
-
-      let preservedUsers = 0;
-      if (applyScope === 'new_only') {
-        const { data: activeSubs, error: subsError } = await supabaseAdmin
-          .from('subscriptions')
-          .select('user_id')
-          .eq('plan_id', planId)
-          .eq('status', 'active');
-
-        if (subsError) {
-          return res.status(500).json({ error: subsError.message });
-        }
-
-        const nextByKey = new Map<string, { limit_value: number | null; window: LimitWindow }>();
-        for (const row of normalizedLimits) {
-          nextByKey.set(row.limit_key, { limit_value: row.limit_value, window: row.window });
-        }
-
-        const allKeys = new Set([...Array.from(previousByKey.keys()), ...Array.from(nextByKey.keys())]);
-        const overrideRows: Array<{
-          profile_id: string;
-          limit_key: string;
-          limit_value: number | null;
-          window: LimitWindow;
-          enabled: boolean;
-        }> = [];
-
-        for (const sub of activeSubs || []) {
-          for (const key of allKeys) {
-            const previous = previousByKey.get(key);
-            const next = nextByKey.get(key);
-            const changed = JSON.stringify(previous || null) !== JSON.stringify(next || null);
-            if (!changed) continue;
-
-            if (!previous) {
-              overrideRows.push({
-                profile_id: (sub as any).user_id,
-                limit_key: key,
-                limit_value: null,
-                window: 'none',
-                enabled: true,
-              });
-              continue;
-            }
-
-            overrideRows.push({
-              profile_id: (sub as any).user_id,
-              limit_key: key,
-              limit_value: previous.limit_value,
-              window: previous.window,
-              enabled: true,
-            });
-          }
-        }
-
-        if (overrideRows.length > 0) {
-          const { error: overrideError } = await supabaseAdmin
-            .from('user_limit_overrides')
-            .upsert(overrideRows, { onConflict: 'profile_id,limit_key' });
-
-          if (overrideError) {
-            return res.status(500).json({
-              error: overrideError.message,
-              hint: 'Ensure user_limit_overrides table and unique constraint (profile_id, limit_key) exist before using apply_scope=new_only.',
-            });
-          }
-        }
-
-        preservedUsers = (activeSubs || []).length;
+      if (updateError) {
+        return res.status(500).json({ error: updateError.message });
       }
 
       await writeAuditLog(requester.id, 'admin.plan.limits.updated', planId, {
-        plan_name: plan.name,
+        plan_name: plan.plan_code,
         apply_scope: applyScope,
         limits: normalizedLimits,
-        affected_active_users: preservedUsers,
       });
 
       res.json({
         success: true,
         plan_id: planId,
-        plan_name: plan.name,
+        plan_name: plan.plan_code,
         apply_scope: applyScope,
         limits: normalizedLimits,
-        affected_active_users: preservedUsers,
+        affected_active_users: 0,
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -1514,18 +1211,20 @@ async function startServer() {
   app.get('/api/admin/payments/prices', clerkMiddleware, requireAdminOrOwner, async (_req, res) => {
     try {
       const { data, error } = await supabaseAdmin
-        .from('plan_prices')
-        .select('id, plan_id, interval, amount, currency, stripe_price_id, is_active, created_at')
-        .order('created_at', { ascending: false });
+        .from('app_billing_plans')
+        .select('plan_code, billing_type, stripe_price_id, is_active')
+        .eq('app_id', 'softi');
 
-      if (error) {
-        return res.status(500).json({
-          error: error.message,
-          hint: 'Ensure plan_prices table exists before using payments management.',
-        });
-      }
-
-      res.json(data || []);
+      if (error) return res.status(500).json({ error: error.message });
+      res.json((data || []).map((p: any) => ({
+        id: p.plan_code,
+        plan_id: p.plan_code,
+        interval: p.billing_type === 'subscription' ? 'month' : 'one_time',
+        amount: 0,
+        currency: 'eur',
+        stripe_price_id: p.stripe_price_id,
+        is_active: p.is_active,
+      })));
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -1534,34 +1233,22 @@ async function startServer() {
   app.patch('/api/admin/payments/prices/:priceId', clerkMiddleware, requireAdminOrOwner, async (req, res) => {
     try {
       const requester = (req as any).requesterProfile;
-      const priceId = req.params.priceId;
-      const amount = Number(req.body?.amount);
-      const currency = String(req.body?.currency || 'eur').toLowerCase();
-      const interval = String(req.body?.interval || 'month').toLowerCase();
+      const priceId = req.params.priceId; // priceId == plan_code in BCS
       const isActive = req.body?.is_active !== false;
 
-      if (!Number.isFinite(amount) || amount < 0) {
-        return res.status(422).json({ error: 'Invalid amount' });
-      }
-
       const { data, error } = await supabaseAdmin
-        .from('plan_prices')
-        .update({ amount: Math.floor(amount), currency, interval, is_active: isActive })
-        .eq('id', priceId)
-        .select('*')
-        .single();
+        .from('app_billing_plans')
+        .update({ is_active: isActive })
+        .eq('app_id', 'softi')
+        .eq('plan_code', priceId)
+        .select('plan_code, billing_type, stripe_price_id, is_active')
+        .maybeSingle();
 
       if (error) {
-        return res.status(500).json({
-          error: error.message,
-          hint: 'Ensure plan_prices table exists and contains target record.',
-        });
+        return res.status(500).json({ error: error.message });
       }
 
       await writeAuditLog(requester.id, 'admin.payments.price.updated', priceId, {
-        amount: Math.floor(amount),
-        currency,
-        interval,
         is_active: isActive,
       });
 
