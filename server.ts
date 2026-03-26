@@ -644,7 +644,7 @@ async function startServer() {
       console.log(`[AI CACHE MISS] type=${type} hash=${query_hash} calling Gemini...`);
 
       let contents = "";
-      const serverModel = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+      const serverModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
       if (type === 'market_data') {
         contents = `Cerca in tempo reale il prezzo attuale (con la relativa valuta/formato) e la variazione percentuale (di oggi) per i seguenti asset finanziari: ${symbols}. Restituisci ESCLUSIVAMENTE un JSON valido come array [...] con campi: symbol, price, change, trend (up/down/neutral).`;
@@ -692,7 +692,7 @@ async function startServer() {
             resultText = fallback.text || "";
           }
         } catch (fallbackErr) {
-          const stableModel = "gemini-2.0-flash";
+          const stableModel = "gemini-2.5-flash";
           if (type === 'market_data') {
             throw fallbackErr;
           } else if (serverModel !== stableModel) {
@@ -828,7 +828,7 @@ async function startServer() {
         content_preview: a.content.length > 2000 ? a.content.substring(0, 2000) + "..." : a.content
       }));
 
-      const serverModel = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+      const serverModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
       const aggregationPrompt = `Sei un supervisore AI di SOFTI AI. Ti fornisco un set di analisi finanziarie e report generati nelle ultime 24 ore dai nostri utenti. 
       Il tuo compito è creare una "Super Analisi" macroscopica che sintetizzi l'attività recente.

@@ -31,7 +31,7 @@ type ResolveMarketDataResult = {
 const DEFAULT_FEEDS = ['google'];
 const SUPPORTED_FEEDS = new Set(['google', 'yahoo', 'marketaux', 'news-events']);
 const GOOGLE_BATCH_SIZE = 14;
-const YAHOO_QUOTE_URL = 'https://query1.finance.yahoo.com/v7/finance/quote';
+const YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart';
 const MARKETAUX_URL = 'https://api.marketaux.com/v1/news/all';
 
 const EXACT_YAHOO_SYMBOLS: Record<string, string> = {
@@ -147,42 +147,62 @@ async function fetchYahooQuotes(symbols: string[]): Promise<Map<string, Resolved
 
   if (yahooPairs.length === 0) return new Map();
 
-  const query = new URL(YAHOO_QUOTE_URL);
-  query.searchParams.set('symbols', yahooPairs.map((entry) => entry.yahoo).join(','));
-
-  const response = await fetch(query, {
-    signal: AbortSignal.timeout(10_000),
-    headers: {
-      'user-agent': 'Softi AI Analyzer/1.0',
-      accept: 'application/json',
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Yahoo Finance responded with ${response.status}`);
-  }
-
-  const payload = await response.json();
-  const results = Array.isArray(payload?.quoteResponse?.result) ? payload.quoteResponse.result : [];
-  const byYahooSymbol = new Map<string, any>();
-
-  for (const quote of results) {
-    const key = String(quote?.symbol || '').toUpperCase();
-    if (!key) continue;
-    byYahooSymbol.set(key, quote);
-  }
-
   const resolved = new Map<string, ResolvedMarketRow>();
-  for (const entry of yahooPairs) {
-    const quote = byYahooSymbol.get(entry.yahoo.toUpperCase());
-    if (!quote) continue;
 
-    resolved.set(entry.original, {
-      symbol: entry.original,
-      price: formatPrice(Number(quote.regularMarketPrice)),
-      change: formatPercent(Number(quote.regularMarketChangePercent)),
-      trend: asTrendFromNumber(Number(quote.regularMarketChangePercent)),
-    });
+  for (const batch of chunk(yahooPairs, 10)) {
+    const results = await Promise.allSettled(batch.map(async (entry) => {
+      const query = new URL(`${YAHOO_CHART_URL}/${encodeURIComponent(entry.yahoo)}`);
+      query.searchParams.set('range', '5d');
+      query.searchParams.set('interval', '1d');
+
+      const response = await fetch(query, {
+        signal: AbortSignal.timeout(10_000),
+        headers: {
+          'user-agent': 'Softi AI Analyzer/1.0',
+          accept: 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Yahoo Finance responded with ${response.status}`);
+      }
+
+      const payload = await response.json();
+      const result = payload?.chart?.result?.[0];
+      const meta = result?.meta || {};
+      const quote = result?.indicators?.quote?.[0] || {};
+      const closes = Array.isArray(quote?.close)
+        ? quote.close.filter((value: unknown) => typeof value === 'number' && Number.isFinite(value))
+        : [];
+      const latestClose = closes.length > 0 ? closes[closes.length - 1] : undefined;
+      const previousClose = closes.length > 1
+        ? closes[closes.length - 2]
+        : typeof meta.previousClose === 'number' ? meta.previousClose : undefined;
+      const latestPrice = typeof meta.regularMarketPrice === 'number' ? meta.regularMarketPrice : latestClose;
+
+      let changePercent: number | undefined;
+      if (typeof meta.regularMarketChangePercent === 'number') {
+        changePercent = meta.regularMarketChangePercent;
+      } else if (typeof latestPrice === 'number' && typeof previousClose === 'number' && previousClose !== 0) {
+        changePercent = ((latestPrice - previousClose) / previousClose) * 100;
+      }
+
+      if (typeof latestPrice !== 'number') {
+        throw new Error(`Yahoo Finance returned no price for ${entry.original}`);
+      }
+
+      return {
+        symbol: entry.original,
+        price: formatPrice(latestPrice),
+        change: formatPercent(changePercent),
+        trend: asTrendFromNumber(changePercent),
+      } satisfies ResolvedMarketRow;
+    }));
+
+    for (const result of results) {
+      if (result.status !== 'fulfilled') continue;
+      resolved.set(result.value.symbol, result.value);
+    }
   }
 
   return resolved;
@@ -271,7 +291,7 @@ async function fetchGoogleGroundedQuotes(
     ].filter(Boolean).join('\n\n');
 
     const response = await ai.models.generateContent({
-      model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
+      model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
       contents: prompt,
       config: { tools: [{ googleSearch: {} }] },
     });

@@ -824,7 +824,7 @@ export function initMt5Bridge({ app, io, ai, supabaseAdmin }: InitMt5BridgeDeps)
         return res.status(404).json({ error: `Analyzer data not found for ${symbol}` });
       }
 
-      const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+      const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
       const prompt = [
         "Sei il modulo Interactive Analysis di SOFTI AI.",
         `Analizza il seguente JSON MT5 per il simbolo ${symbol}.`,
@@ -879,7 +879,7 @@ export function initMt5Bridge({ app, io, ai, supabaseAdmin }: InitMt5BridgeDeps)
         historical_json_files: historicalContext.json_files.length,
       };
 
-      const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+      const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
       const prompt = [
         "Sei un Head Trader istituzionale e analista finanziario senior di SOFTI AI.",
         `Genera un Market Report ${timeframe} professionale in italiano usando esclusivamente i dati MT5 forniti.`,
