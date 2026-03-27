@@ -76,6 +76,7 @@ export default function MainDashboard() {
     useEffect(() => {
         if (user && !synced) {
             const syncUser = async () => {
+                let resolvedRole = 'user';
                 try {
                     let token: string | null = null;
                     if (user) {
@@ -98,12 +99,22 @@ export default function MainDashboard() {
                     });
                     if (response.ok) {
                         const data = await response.json();
-                        setUserRole(data.profile?.role || 'user');
+                        resolvedRole = data.profile?.role || resolvedRole;
                         console.log('User synced with Supabase. Role:', data.profile?.role);
+                    }
+
+                    // `/api/me` is the authoritative role source already used by the admin route guard.
+                    // Read it here as well so the main dashboard sidebar does not fall back to "user"
+                    // when Clerk/Supabase sync succeeds partially or returns stale role data.
+                    const meResponse = await fetch('/api/me', { headers });
+                    if (meResponse.ok) {
+                        const payload = await meResponse.json();
+                        resolvedRole = payload?.profile?.role || resolvedRole;
                     }
                 } catch (error) {
                     console.error('Failed to sync user:', error);
                 } finally {
+                    setUserRole(resolvedRole);
                     setSynced(true);
                 }
             };
