@@ -25,7 +25,8 @@ export async function syncClerkUser(
     }
 
     const role = roleOverride || profile?.role || 'user';
-    const fullName = [firstName, lastName].filter(Boolean).join(' ').trim() || null;
+    const normalizedFirstName = firstName?.trim() || null;
+    const normalizedLastName = lastName?.trim() || null;
 
     if (!profile) {
       const { data: newProfile, error: createError } = await supabaseAdmin
@@ -33,7 +34,8 @@ export async function syncClerkUser(
         .insert({
           id: randomUUID(),
           email: normalizedEmail,
-          full_name: fullName,
+          first_name: normalizedFirstName,
+          last_name: normalizedLastName,
           role,
         })
         .select()
@@ -47,8 +49,12 @@ export async function syncClerkUser(
 
     const updatePayload: Record<string, unknown> = {};
 
-    if (fullName !== profile.full_name) {
-      updatePayload.full_name = fullName;
+    if (normalizedFirstName !== (profile.first_name ?? null)) {
+      updatePayload.first_name = normalizedFirstName;
+    }
+
+    if (normalizedLastName !== (profile.last_name ?? null)) {
+      updatePayload.last_name = normalizedLastName;
     }
 
     if (Object.keys(updatePayload).length === 0) {

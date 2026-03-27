@@ -10,7 +10,9 @@ import { cn } from '../../lib/utils';
 interface UserProfile {
     id: string;
     email: string;
-    full_name: string;
+    first_name?: string | null;
+    last_name?: string | null;
+    full_name?: string | null;
     role: 'owner' | 'admin' | 'user';
     subscription_status?: string | null;
     plan_name?: string;
@@ -77,6 +79,15 @@ interface BillingRecord {
 }
 
 type ApplyScope = 'all_active_and_new' | 'new_only';
+
+const getUserDisplayName = (user: UserProfile) => {
+    const nameFromParts = [user.first_name, user.last_name]
+        .filter((value): value is string => Boolean(value && value.trim()))
+        .join(' ')
+        .trim();
+
+    return nameFromParts || user.full_name || 'No Name';
+};
 
 export default function AdminPanel() {
     const { getToken } = useAuth();
@@ -531,7 +542,7 @@ export default function AdminPanel() {
     const filteredUsers = users.filter((user) => {
         const lower = query.toLowerCase();
         if (!lower.trim()) return true;
-        return user.email.toLowerCase().includes(lower) || (user.full_name || '').toLowerCase().includes(lower);
+        return user.email.toLowerCase().includes(lower) || getUserDisplayName(user).toLowerCase().includes(lower);
     });
 
     const roleStats = filteredUsers.reduce(
@@ -711,7 +722,7 @@ export default function AdminPanel() {
                                             <tr key={user.id} className="border-b border-[#30363D] hover:bg-white/5 transition-colors group">
                                                 <td className="px-8 py-5">
                                                     <div className="flex flex-col">
-                                                        <span className="text-sm font-bold text-white mb-0.5">{user.full_name || 'No Name'}</span>
+                                                        <span className="text-sm font-bold text-white mb-0.5">{getUserDisplayName(user)}</span>
                                                         <span className="text-xs text-[#8B949E]">{user.email}</span>
                                                     </div>
                                                 </td>

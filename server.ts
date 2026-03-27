@@ -739,7 +739,7 @@ async function startServer() {
     try {
       const { data: profiles, error: profileError } = await supabaseAdmin
         .from('profiles')
-        .select('id, email, full_name, role, created_at')
+        .select('id, email, first_name, last_name, role, created_at')
         .order('created_at', { ascending: false });
 
       if (profileError) {
@@ -862,7 +862,7 @@ async function startServer() {
         .from('profiles')
         .update({ role: normalizedRole, updated_at: new Date().toISOString() })
         .eq('id', userId)
-        .select('id, email, full_name, role, created_at')
+        .select('id, email, first_name, last_name, role, created_at')
         .single();
 
       if (updateError) {
