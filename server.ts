@@ -40,6 +40,8 @@ const __dirname = path.dirname(__filename);
 const renderOriginPattern = /^https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)*\.onrender\.com$/i;
 const spaRoutePattern = /^\/(?!api(?:\/|$)).*/;
 const missingSupabaseCodes = new Set(['PGRST205', '42P01', '42703']);
+const legacyRenderHost = 'softi-ai-analyzer.onrender.com';
+const canonicalAppHost = process.env.CANONICAL_APP_HOST || 'softi.ultrabot.space';
 
 const isAllowedCorsOrigin = (origin?: string | null) => {
   if (!origin) return true;
@@ -82,6 +84,24 @@ async function startServer() {
   console.log("-----------------------------------\n");
 
   const ai = new GoogleGenAI({ apiKey: geminiApiKey || "" });
+
+  app.use((req, res, next) => {
+    const forwardedHost = req.get('x-forwarded-host');
+    const host = (forwardedHost || req.get('host') || '').split(',')[0].trim().toLowerCase();
+    const isLegacyRenderHost = host === legacyRenderHost;
+    const isWebRequest = req.method === 'GET' || req.method === 'HEAD';
+    const isBypassedPath =
+      req.path === '/api/health' ||
+      req.path.startsWith('/api/') ||
+      req.path.startsWith('/socket.io');
+
+    if (isLegacyRenderHost && isWebRequest && !isBypassedPath) {
+      res.redirect(308, `https://${canonicalAppHost}${req.originalUrl}`);
+      return;
+    }
+
+    next();
+  });
 
   app.use((req, res, next) => {
     const origin = req.headers.origin;
